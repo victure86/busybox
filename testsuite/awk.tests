@@ -261,6 +261,25 @@ end d
 " \
 	"" ""
 
+prg='
+BEGIN{
+cnt = 0
+a[cnt] = "zeroth"
+a[++cnt] = "first"
+delete a[cnt--]
+print cnt
+print "[0]:" a[0]
+print "[1]:" a[1]
+}'
+testing "awk 'delete a[v--]' evaluates v-- once" \
+	"awk '$prg'" \
+	"\
+0
+[0]:zeroth
+[1]:
+" \
+	"" ""
+
 testing "awk handles empty ()" \
 	"awk 'BEGIN {print()}' 2>&1" "awk: cmd. line:1: Empty sequence\n" "" ""
 
@@ -281,6 +300,11 @@ testing "awk length(array)" \
 	"2\n" \
 	"" ""
 
+testing "awk length()" \
+	"awk '{print length; print length(); print length(\"qwe\"); print length(99+9)}'" \
+	"3\n3\n3\n3\n" \
+	"" "qwe"
+
 testing "awk -f and ARGC" \
 	"awk -f - input" \
 	"re\n2\n" \
@@ -295,6 +319,31 @@ testing "awk -e and ARGC" \
 	""
 SKIP=
 
+# The examples are in fact not valid awk programs (break/continue
+# can only be used inside loops).
+# But we do accept them outside of loops.
+# We had a bug with misparsing "break ; else" sequence.
+# Test that *that* bug is fixed, using simplest possible scripts:
+testing "awk break" \
+	"awk -f - 2>&1; echo \$?" \
+	"0\n" \
+	"" \
+	'BEGIN { if (1) break; else a = 1 }'
+testing "awk continue" \
+	"awk -f - 2>&1; echo \$?" \
+	"0\n" \
+	"" \
+	'BEGIN { if (1) continue; else a = 1 }'
+
+testing "awk handles invalid for loop" \
+    "awk '{ for() }' 2>&1" "awk: cmd. line:1: Unexpected token\n" "" ""
+
 # testing "description" "command" "result" "infile" "stdin"
+testing 'awk negative field access' \
+	'awk 2>&1 -- '\''{ $(-1) }'\' \
+	"awk: cmd. line:1: Access to negative field\n" \
+	'' \
+	'anything'
+
 
 exit $FAILCOUNT

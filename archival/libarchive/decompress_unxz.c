@@ -27,18 +27,23 @@ static uint32_t xz_crc32(const uint8_t *buf, size_t size, uint32_t crc)
 	return ~crc32_block_endian0(~crc, buf, size, global_crc32_table);
 }
 
-/* We use arch-optimized unaligned accessors */
-#define get_unaligned_le32(buf) ({ uint32_t v; move_from_unaligned32(v, buf); SWAP_LE32(v); })
-#define get_unaligned_be32(buf) ({ uint32_t v; move_from_unaligned32(v, buf); SWAP_BE32(v); })
-#define put_unaligned_le32(val, buf) move_to_unaligned32(buf, SWAP_LE32(val))
-#define put_unaligned_be32(val, buf) move_to_unaligned32(buf, SWAP_BE32(val))
+/* We use arch-optimized unaligned fixed-endian accessors.
+ * They have been moved to libbb (proved to be useful elsewhere as well),
+ * just check that we have them defined:
+ */
+#if !defined(get_unaligned_le32) \
+ || !defined(get_unaligned_be32) \
+ || !defined(put_unaligned_le32) \
+ || !defined(put_unaligned_be32)
+# error get_unaligned_le32 accessors are not defined
+#endif
 
 #include "unxz/xz_dec_bcj.c"
 #include "unxz/xz_dec_lzma2.c"
 #include "unxz/xz_dec_stream.c"
 
 IF_DESKTOP(long long) int FAST_FUNC
-unpack_xz_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
+unpack_xz_stream(transformer_state_t *xstate)
 {
 	enum xz_ret xz_result;
 	struct xz_buf iobuf;
@@ -47,7 +52,7 @@ unpack_xz_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 	IF_DESKTOP(long long) int total = 0;
 
 	if (!global_crc32_table)
-		global_crc32_table = crc32_filltable(NULL, /*endian:*/ 0);
+		global_crc32_new_table_le();
 
 	memset(&iobuf, 0, sizeof(iobuf));
 	membuf = xmalloc(2 * BUFSIZ);
@@ -55,7 +60,7 @@ unpack_xz_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 	iobuf.out = membuf + BUFSIZ;
 	iobuf.out_size = BUFSIZ;
 
-	if (!aux || aux->check_signature == 0) {
+	if (!xstate || xstate->signature_skipped) {
 		/* Preload XZ file signature */
 		strcpy((char*)membuf, HEADER_MAGIC);
 		iobuf.in_size = HEADER_MAGIC_SIZE;
@@ -67,7 +72,7 @@ unpack_xz_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 	xz_result = X_OK;
 	while (1) {
 		if (iobuf.in_pos == iobuf.in_size) {
-			int rd = safe_read(src_fd, membuf, BUFSIZ);
+			int rd = safe_read(xstate->src_fd, membuf, BUFSIZ);
 			if (rd < 0) {
 				bb_error_msg(bb_msg_read_error);
 				total = -1;
@@ -104,7 +109,7 @@ unpack_xz_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 //		bb_error_msg("<in pos:%d size:%d out pos:%d size:%d r:%d",
 //				iobuf.in_pos, iobuf.in_size, iobuf.out_pos, iobuf.out_size, xz_result);
 		if (iobuf.out_pos) {
-			xwrite(dst_fd, iobuf.out, iobuf.out_pos);
+			xtransformer_write(xstate, iobuf.out, iobuf.out_pos);
 			IF_DESKTOP(total += iobuf.out_pos;)
 			iobuf.out_pos = 0;
 		}

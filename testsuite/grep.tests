@@ -15,7 +15,7 @@
 
 testing "grep (exit with error)" "grep nonexistent 2> /dev/null ; echo \$?" \
 	"1\n" "" ""
-testing "grep (exit success)" "grep grep $0 > /dev/null 2>&1 ; echo \$?" "0\n" \
+testing "grep (exit success)" "grep grep '$0' > /dev/null 2>&1 ; echo \$?" "0\n" \
 	"" ""
 # Test various data sources and destinations
 
@@ -96,7 +96,7 @@ testing "grep -x -F (partial match 1)" "grep -x -F foo input ; echo \$?" \
 testing "grep -x -F (partial match 2)" "grep -x -F foo input ; echo \$?" \
 	"1\n" "bar foo\n" ""
 
-optional FEATURE_GREP_EGREP_ALIAS
+optional EGREP
 testing "grep -E supports extended regexps" "grep -E fo+" "foo\n" "" \
 	"b\ar\nfoo\nbaz"
 testing "grep is also egrep" "egrep foo" "foo\n" "" "foo\nbar\n"
@@ -165,11 +165,37 @@ testing "grep -w word doesn't match wordword" \
 	"wordword\n" \
 	""
 
+testing "grep -F -w w doesn't match ww" \
+	"grep -F -w w input" \
+	"" \
+	"ww\n" \
+	""
+
 testing "grep -w word match second word" \
 	"grep -w word input" \
 	"bword,word\n""wordb,word\n""bwordb,word\n" \
 	"bword,word\n""wordb,word\n""bwordb,word\n" \
 	""
+
+# -r on symlink to dir should recurse into dir
+mkdir -p grep.testdir/foo
+echo bar > grep.testdir/foo/file
+ln -s foo grep.testdir/symfoo
+testing "grep -r on symlink to dir" \
+	"grep -r . grep.testdir/symfoo" \
+	"grep.testdir/symfoo/file:bar\n" \
+	"" ""
+rm -Rf grep.testdir
+
+# But -r on dir/symlink_to_dir should not recurse into symlink_to_dir
+mkdir -p grep.testdir/foo
+echo bar > grep.testdir/foo/file
+ln -s foo grep.testdir/symfoo
+testing "grep -r on dir/symlink to dir" \
+	"grep -r . grep.testdir" \
+	"grep.testdir/foo/file:bar\n" \
+	"" ""
+rm -Rf grep.testdir
 
 # testing "test name" "commands" "expected result" "file input" "stdin"
 #   file input will be file called "input"

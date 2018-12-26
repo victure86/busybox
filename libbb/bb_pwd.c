@@ -7,7 +7,6 @@
  *
  * Licensed under GPLv2 or later, see file LICENSE in this source tree.
  */
-
 #include "libbb.h"
 
 /* TODO: maybe change API to return malloced data?
@@ -31,9 +30,9 @@ struct group* FAST_FUNC xgetgrnam(const char *name)
 	return gr;
 }
 
-
 struct passwd* FAST_FUNC xgetpwuid(uid_t uid)
 {
+	/* Note: used in nofork applets (whoami), be careful not to leak anything */
 	struct passwd *pw = getpwuid(uid);
 	if (!pw)
 		bb_error_msg_and_die("unknown uid %u", (unsigned)uid);
@@ -50,6 +49,7 @@ struct group* FAST_FUNC xgetgrgid(gid_t gid)
 
 char* FAST_FUNC xuid2uname(uid_t uid)
 {
+	/* Note: used in nofork applets (whoami), be careful not to leak anything */
 	struct passwd *pw = xgetpwuid(uid);
 	return pw->pw_name;
 }
@@ -110,51 +110,3 @@ unsigned long FAST_FUNC get_ug_id(const char *s,
 		return xname2id(s);
 	return r;
 }
-
-/* Experimental "mallocing" API.
- * The goal is nice: "we want to support a case when "guests" group is very large"
- * but the code is butt-ugly.
- */
-#if 0
-static char *find_latest(char last, char *cp)
-{
-	if (!cp)
-		return last;
-	cp += strlen(cp) + 1;
-	if (last < cp)
-		last = cp;
-	return last;
-}
-
-struct group* FAST_FUNC xmalloc_getgrnam(const char *name)
-{
-	struct {
-		struct group gr;
-		// May still be not enough!
-		char buf[64*1024 - sizeof(struct group) - 16];
-	} *s;
-	struct group *grp;
-	int r;
-	char *last;
-	char **gr_mem;
-
-	s = xmalloc(sizeof(*s));
-	r = getgrnam_r(name, &s->gr, s->buf, sizeof(s->buf), &grp);
-	if (!grp) {
-		free(s);
-		return grp;
-	}
-	last = find_latest(s->buf, grp->gr_name);
-	last = find_latest(last, grp->gr_passwd);
-	gr_mem = grp->gr_mem;
-	while (*gr_mem)
-		last = find_latest(last, *gr_mem++);
-	gr_mem++; /* points past NULL */
-	if (last < (char*)gr_mem)
-		last = (char*)gr_mem;
-//FIXME: what if we get not only truncated, but also moved here?
-// grp->gr_name pointer and friends are invalid now!!!
-	s = xrealloc(s, last - (char*)s);
-	return grp;
-}
-#endif

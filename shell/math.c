@@ -415,10 +415,29 @@ arith_apply(arith_state_t *math_state, operator op, var_or_num_t *numstack, var_
 		}
 		else if (right_side_val == 0)
 			return "divide by zero";
-		else if (op == TOK_DIV || op == TOK_DIV_ASSIGN)
-			rez /= right_side_val;
-		else if (op == TOK_REM || op == TOK_REM_ASSIGN)
-			rez %= right_side_val;
+		else if (op == TOK_DIV || op == TOK_DIV_ASSIGN
+		      || op == TOK_REM || op == TOK_REM_ASSIGN) {
+			/*
+			 * bash 4.2.45 x86 64bit: SEGV on 'echo $((2**63 / -1))'
+			 *
+			 * MAX_NEGATIVE_INT / -1 = MAX_POSITIVE_INT+1
+			 * and thus is not representable.
+			 * Some CPUs segfault trying such op.
+			 * Others overflow MAX_POSITIVE_INT+1 to
+			 * MAX_NEGATIVE_INT (0x7fff+1 = 0x8000).
+			 * Make sure to at least not SEGV here:
+			 */
+			if (right_side_val == -1
+			 && rez << 1 == 0 /* MAX_NEGATIVE_INT or 0 */
+			) {
+				right_side_val = 1;
+			}
+			if (op == TOK_DIV || op == TOK_DIV_ASSIGN)
+				rez /= right_side_val;
+			else {
+				rez %= right_side_val;
+			}
+		}
 	}
 
 	if (is_assign_op(op)) {
@@ -579,10 +598,24 @@ evaluate_string(arith_state_t *math_state, const char *expr)
 		}
 
 		/* Should be an operator */
+
+		/* Special case: NUM-- and NUM++ are not recognized if NUM
+		 * is a literal number, not a variable. IOW:
+		 * "a+++v" is a++ + v.
+		 * "7+++v" is 7 + ++v, not 7++ + v.
+		 */
+		if (lasttok == TOK_NUM && !numstackptr[-1].var /* number literal */
+		 && (expr[0] == '+' || expr[0] == '-')
+		 && (expr[1] == expr[0])
+		) {
+			//bb_error_msg("special %c%c", expr[0], expr[0]);
+			op = (expr[0] == '+' ? TOK_ADD : TOK_SUB);
+			expr += 1;
+			goto tok_found1;
+		}
+
 		p = op_tokens;
 		while (1) {
-// TODO: bash allows 7+++v, treats it as 7 + ++v
-// we treat it as 7++ + v and reject
 			/* Compare expr to current op_tokens[] element */
 			const char *e = expr;
 			while (1) {
@@ -608,6 +641,7 @@ evaluate_string(arith_state_t *math_state, const char *expr)
 		}
  tok_found:
 		op = p[1]; /* fetch TOK_foo value */
+ tok_found1:
 		/* NB: expr now points past the operator */
 
 		/* post grammar: a++ reduce to num */
@@ -724,7 +758,7 @@ arith(arith_state_t *math_state, const char *expr)
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ''AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE

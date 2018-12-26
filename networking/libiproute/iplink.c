@@ -52,6 +52,9 @@ struct ifla_vlan_flags {
 # define dbg(...) ((void)0)
 #endif
 
+
+#define str_on_off "on\0""off\0"
+
 /* Exits on error */
 static int get_ctl_fd(void)
 {
@@ -125,16 +128,40 @@ static void set_mtu(char *dev, int mtu)
 }
 
 /* Exits on error */
+static void set_master(char *dev, int master)
+{
+	struct rtnl_handle rth;
+	struct {
+		struct nlmsghdr  n;
+		struct ifinfomsg i;
+		char             buf[1024];
+	} req;
+
+	memset(&req, 0, sizeof(req));
+
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.n.nlmsg_flags = NLM_F_REQUEST;
+	req.n.nlmsg_type = RTM_NEWLINK;
+	req.i.ifi_family = preferred_family;
+
+	xrtnl_open(&rth);
+	req.i.ifi_index = xll_name_to_index(dev);
+	//printf("master %i for %i\n", master, req.i.ifi_index);
+	addattr_l(&req.n, sizeof(req), IFLA_MASTER, &master, 4);
+	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
+		xfunc_die();
+}
+
+/* Exits on error */
 static int get_address(char *dev, int *htype)
 {
 	struct ifreq ifr;
 	struct sockaddr_ll me;
-	socklen_t alen;
 	int s;
 
 	s = xsocket(PF_PACKET, SOCK_DGRAM, 0);
 
-	memset(&ifr, 0, sizeof(ifr));
+	/*memset(&ifr, 0, sizeof(ifr)); - SIOCGIFINDEX does not need to clear all */
 	strncpy_IFNAMSIZ(ifr.ifr_name, dev);
 	xioctl(s, SIOCGIFINDEX, &ifr);
 
@@ -143,8 +170,7 @@ static int get_address(char *dev, int *htype)
 	me.sll_ifindex = ifr.ifr_ifindex;
 	me.sll_protocol = htons(ETH_P_LOOP);
 	xbind(s, (struct sockaddr*)&me, sizeof(me));
-	alen = sizeof(me);
-	getsockname(s, (struct sockaddr*)&me, &alen);
+	bb_getsockname(s, (struct sockaddr*)&me, sizeof(me));
 	//never happens:
 	//if (getsockname(s, (struct sockaddr*)&me, &alen) == -1)
 	//	bb_perror_msg_and_die("getsockname");
@@ -199,17 +225,22 @@ static int do_set(char **argv)
 	uint32_t flags = 0;
 	int qlen = -1;
 	int mtu = -1;
+	int master = -1;
 	char *newaddr = NULL;
 	char *newbrd = NULL;
 	struct ifreq ifr0, ifr1;
 	char *newname = NULL;
 	int htype, halen;
+	/* If you add stuff here, update iplink_full_usage */
 	static const char keywords[] ALIGN1 =
 		"up\0""down\0""name\0""mtu\0""qlen\0""multicast\0"
-		"arp\0""address\0""dev\0";
+		"arp\0""promisc\0""address\0"
+		"master\0""nomaster\0"
+		"dev\0" /* must be last */;
 	enum { ARG_up = 0, ARG_down, ARG_name, ARG_mtu, ARG_qlen, ARG_multicast,
-		ARG_arp, ARG_addr, ARG_dev };
-	static const char str_on_off[] ALIGN1 = "on\0""off\0";
+		ARG_arp, ARG_promisc, ARG_addr,
+		ARG_master, ARG_nomaster,
+		ARG_dev };
 	enum { PARM_on = 0, PARM_off };
 	smalluint key;
 
@@ -232,6 +263,7 @@ static int do_set(char **argv)
 				duparg("mtu", *argv);
 			mtu = get_unsigned(*argv, "mtu");
 		} else if (key == ARG_qlen) {
+//TODO: txqueuelen, txqlen are synonyms to qlen
 			NEXT_ARG();
 			if (qlen != -1)
 				duparg("qlen", *argv);
@@ -239,7 +271,13 @@ static int do_set(char **argv)
 		} else if (key == ARG_addr) {
 			NEXT_ARG();
 			newaddr = *argv;
+		} else if (key == ARG_master) {
+			NEXT_ARG();
+			master = xll_name_to_index(*argv);
+		} else if (key == ARG_nomaster) {
+			master = 0;
 		} else if (key >= ARG_dev) {
+			/* ^^^^^^ ">=" here results in "dev IFACE" treated as default */
 			if (key == ARG_dev) {
 				NEXT_ARG();
 			}
@@ -247,6 +285,7 @@ static int do_set(char **argv)
 				duparg2("dev", *argv);
 			dev = *argv;
 		} else {
+			/* "on|off" options */
 			int param;
 			NEXT_ARG();
 			param = index_in_strings(str_on_off, *argv);
@@ -266,8 +305,132 @@ static int do_set(char **argv)
 					flags &= ~IFF_NOARP;
 				else
 					flags |= IFF_NOARP;
+			} else if (key == ARG_promisc) {
+				if (param < 0)
+					die_must_be_on_off("promisc");
+				mask |= IFF_PROMISC;
+				if (param == PARM_on)
+					flags |= IFF_PROMISC;
+				else
+					flags &= ~IFF_PROMISC;
 			}
 		}
+
+/* Other keywords recognized by iproute2-3.12.0: */
+#if 0
+		} else if (matches(*argv, "broadcast") == 0 ||
+				strcmp(*argv, "brd") == 0) {
+			NEXT_ARG();
+			len = ll_addr_a2n(abuf, sizeof(abuf), *argv);
+			if (len < 0)
+				return -1;
+			addattr_l(&req->n, sizeof(*req), IFLA_BROADCAST, abuf, len);
+                } else if (strcmp(*argv, "netns") == 0) {
+                        NEXT_ARG();
+                        if (netns != -1)
+                                duparg("netns", *argv);
+			if ((netns = get_netns_fd(*argv)) >= 0)
+				addattr_l(&req->n, sizeof(*req), IFLA_NET_NS_FD, &netns, 4);
+			else if (get_integer(&netns, *argv, 0) == 0)
+				addattr_l(&req->n, sizeof(*req), IFLA_NET_NS_PID, &netns, 4);
+			else
+                                invarg_1_to_2(*argv, "netns");
+		} else if (strcmp(*argv, "allmulticast") == 0) {
+			NEXT_ARG();
+			req->i.ifi_change |= IFF_ALLMULTI;
+			if (strcmp(*argv, "on") == 0) {
+				req->i.ifi_flags |= IFF_ALLMULTI;
+			} else if (strcmp(*argv, "off") == 0) {
+				req->i.ifi_flags &= ~IFF_ALLMULTI;
+			} else
+				return on_off("allmulticast", *argv);
+		} else if (strcmp(*argv, "trailers") == 0) {
+			NEXT_ARG();
+			req->i.ifi_change |= IFF_NOTRAILERS;
+			if (strcmp(*argv, "off") == 0) {
+				req->i.ifi_flags |= IFF_NOTRAILERS;
+			} else if (strcmp(*argv, "on") == 0) {
+				req->i.ifi_flags &= ~IFF_NOTRAILERS;
+			} else
+				return on_off("trailers", *argv);
+		} else if (strcmp(*argv, "vf") == 0) {
+			struct rtattr *vflist;
+			NEXT_ARG();
+			if (get_integer(&vf,  *argv, 0)) {
+				invarg_1_to_2(*argv, "vf");
+			}
+			vflist = addattr_nest(&req->n, sizeof(*req),
+					      IFLA_VFINFO_LIST);
+			len = iplink_parse_vf(vf, &argc, &argv, req);
+			if (len < 0)
+				return -1;
+			addattr_nest_end(&req->n, vflist);
+		} else if (matches(*argv, "master") == 0) {
+			int ifindex;
+			NEXT_ARG();
+			ifindex = ll_name_to_index(*argv);
+			if (!ifindex)
+				invarg_1_to_2(*argv, "master");
+			addattr_l(&req->n, sizeof(*req), IFLA_MASTER,
+				  &ifindex, 4);
+		} else if (matches(*argv, "nomaster") == 0) {
+			int ifindex = 0;
+			addattr_l(&req->n, sizeof(*req), IFLA_MASTER,
+				  &ifindex, 4);
+		} else if (matches(*argv, "dynamic") == 0) {
+			NEXT_ARG();
+			req->i.ifi_change |= IFF_DYNAMIC;
+			if (strcmp(*argv, "on") == 0) {
+				req->i.ifi_flags |= IFF_DYNAMIC;
+			} else if (strcmp(*argv, "off") == 0) {
+				req->i.ifi_flags &= ~IFF_DYNAMIC;
+			} else
+				return on_off("dynamic", *argv);
+		} else if (matches(*argv, "alias") == 0) {
+			NEXT_ARG();
+			addattr_l(&req->n, sizeof(*req), IFLA_IFALIAS,
+				  *argv, strlen(*argv));
+			argc--; argv++;
+			break;
+		} else if (strcmp(*argv, "group") == 0) {
+			NEXT_ARG();
+			if (*group != -1)
+				duparg("group", *argv);
+			if (rtnl_group_a2n(group, *argv))
+				invarg_1_to_2(*argv, "group");
+		} else if (strcmp(*argv, "mode") == 0) {
+			int mode;
+			NEXT_ARG();
+			mode = get_link_mode(*argv);
+			if (mode < 0)
+				invarg_1_to_2(*argv, "mode");
+			addattr8(&req->n, sizeof(*req), IFLA_LINKMODE, mode);
+		} else if (strcmp(*argv, "state") == 0) {
+			int state;
+			NEXT_ARG();
+			state = get_operstate(*argv);
+			if (state < 0)
+				invarg_1_to_2(*argv, "state");
+			addattr8(&req->n, sizeof(*req), IFLA_OPERSTATE, state);
+		} else if (matches(*argv, "numtxqueues") == 0) {
+			NEXT_ARG();
+			if (numtxqueues != -1)
+				duparg("numtxqueues", *argv);
+			if (get_integer(&numtxqueues, *argv, 0))
+				invarg_1_to_2(*argv, "numtxqueues");
+			addattr_l(&req->n, sizeof(*req), IFLA_NUM_TX_QUEUES,
+				  &numtxqueues, 4);
+		} else if (matches(*argv, "numrxqueues") == 0) {
+			NEXT_ARG();
+			if (numrxqueues != -1)
+				duparg("numrxqueues", *argv);
+			if (get_integer(&numrxqueues, *argv, 0))
+				invarg_1_to_2(*argv, "numrxqueues");
+			addattr_l(&req->n, sizeof(*req), IFLA_NUM_RX_QUEUES,
+				  &numrxqueues, 4);
+		}
+#endif
+
 		argv++;
 	}
 
@@ -297,6 +460,9 @@ static int do_set(char **argv)
 	if (mtu != -1) {
 		set_mtu(dev, mtu);
 	}
+	if (master != -1) {
+		set_master(dev, master);
+	}
 	if (mask)
 		do_chflags(dev, flags, mask);
 	return 0;
@@ -322,10 +488,6 @@ static void vlan_parse_opt(char **argv, struct nlmsghdr *n, unsigned int size)
 		"802.1q\0"
 		"802.1ad\0"
 	;
-	static const char str_on_off[] ALIGN1 =
-		"on\0"
-		"off\0"
-	;
 	enum {
 		ARG_id = 0,
 		ARG_reorder_hdr,
@@ -349,7 +511,7 @@ static void vlan_parse_opt(char **argv, struct nlmsghdr *n, unsigned int size)
 	while (*argv) {
 		arg = index_in_substrings(keywords, *argv);
 		if (arg < 0)
-			invarg(*argv, "type vlan");
+			invarg_1_to_2(*argv, "type vlan");
 
 		NEXT_ARG();
 		if (arg == ARG_id) {
@@ -399,6 +561,24 @@ static void vlan_parse_opt(char **argv, struct nlmsghdr *n, unsigned int size)
 		addattr_l(n, size, IFLA_VLAN_FLAGS, &flags, sizeof(flags));
 }
 
+static void vrf_parse_opt(char **argv, struct nlmsghdr *n, unsigned int size)
+{
+/* IFLA_VRF_TABLE is an enum, not a define -
+ * can't test "defined(IFLA_VRF_TABLE)".
+ */
+#if !defined(IFLA_VRF_MAX)
+# define IFLA_VRF_TABLE 1
+#endif
+	uint32_t table;
+
+	if (strcmp(*argv, "table") != 0)
+		invarg_1_to_2(*argv, "type vrf");
+
+	NEXT_ARG();
+	table = get_u32(*argv, "table");
+	addattr_l(n, size, IFLA_VRF_TABLE, &table, sizeof(table));
+}
+
 #ifndef NLMSG_TAIL
 #define NLMSG_TAIL(nmsg) \
 	((struct rtattr *) (((void *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
@@ -437,6 +617,8 @@ static int do_add_or_delete(char **argv, const unsigned rtm)
 	if (rtm == RTM_NEWLINK)
 		req.n.nlmsg_flags |= NLM_F_CREATE|NLM_F_EXCL;
 
+	/* NB: update iplink_full_usage if you extend this code */
+
 	while (*argv) {
 		arg = index_in_substrings(keywords, *argv);
 		if (arg == ARG_type) {
@@ -456,7 +638,7 @@ static int do_add_or_delete(char **argv, const unsigned rtm)
 		} else if (arg == ARG_address) {
 			NEXT_ARG();
 			address_str = *argv;
-			dbg("address_str:'%s'", name_str);
+			dbg("address_str:'%s'", address_str);
 		} else {
 			if (arg == ARG_dev) {
 				if (dev_str)
@@ -483,6 +665,8 @@ static int do_add_or_delete(char **argv, const unsigned rtm)
 
 			if (strcmp(type_str, "vlan") == 0)
 				vlan_parse_opt(argv, &req.n, sizeof(req));
+			else if (strcmp(type_str, "vrf") == 0)
+				vrf_parse_opt(argv, &req.n, sizeof(req));
 
 			data->rta_len = (void *)NLMSG_TAIL(&req.n) - (void *)data;
 		}
@@ -512,7 +696,7 @@ static int do_add_or_delete(char **argv, const unsigned rtm)
 	if (name_str) {
 		const size_t name_len = strlen(name_str) + 1;
 		if (name_len < 2 || name_len > IFNAMSIZ)
-			invarg(name_str, "name");
+			invarg_1_to_2(name_str, "name");
 		addattr_l(&req.n, sizeof(req), IFLA_IFNAME, name_str, name_len);
 	}
 	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
@@ -520,174 +704,17 @@ static int do_add_or_delete(char **argv, const unsigned rtm)
 	return 0;
 }
 
-/* Other keywords recognized by iproute2-3.12.0: */
-#if 0
-		} else if (matches(*argv, "broadcast") == 0 ||
-				strcmp(*argv, "brd") == 0) {
-			NEXT_ARG();
-			len = ll_addr_a2n(abuf, sizeof(abuf), *argv);
-			if (len < 0)
-				return -1;
-			addattr_l(&req->n, sizeof(*req), IFLA_BROADCAST, abuf, len);
-		} else if (matches(*argv, "txqueuelen") == 0 ||
-				strcmp(*argv, "qlen") == 0 ||
-				matches(*argv, "txqlen") == 0) {
-			NEXT_ARG();
-			if (qlen != -1)
-				duparg("txqueuelen", *argv);
-			if (get_integer(&qlen,  *argv, 0))
-				invarg("Invalid \"txqueuelen\" value\n", *argv);
-			addattr_l(&req->n, sizeof(*req), IFLA_TXQLEN, &qlen, 4);
-		} else if (strcmp(*argv, "mtu") == 0) {
-			NEXT_ARG();
-			if (mtu != -1)
-				duparg("mtu", *argv);
-			if (get_integer(&mtu, *argv, 0))
-				invarg("Invalid \"mtu\" value\n", *argv);
-			addattr_l(&req->n, sizeof(*req), IFLA_MTU, &mtu, 4);
-                } else if (strcmp(*argv, "netns") == 0) {
-                        NEXT_ARG();
-                        if (netns != -1)
-                                duparg("netns", *argv);
-			if ((netns = get_netns_fd(*argv)) >= 0)
-				addattr_l(&req->n, sizeof(*req), IFLA_NET_NS_FD, &netns, 4);
-			else if (get_integer(&netns, *argv, 0) == 0)
-				addattr_l(&req->n, sizeof(*req), IFLA_NET_NS_PID, &netns, 4);
-			else
-                                invarg("Invalid \"netns\" value\n", *argv);
-		} else if (strcmp(*argv, "multicast") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_MULTICAST;
-			if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags |= IFF_MULTICAST;
-			} else if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags &= ~IFF_MULTICAST;
-			} else
-				return on_off("multicast", *argv);
-		} else if (strcmp(*argv, "allmulticast") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_ALLMULTI;
-			if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags |= IFF_ALLMULTI;
-			} else if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags &= ~IFF_ALLMULTI;
-			} else
-				return on_off("allmulticast", *argv);
-		} else if (strcmp(*argv, "promisc") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_PROMISC;
-			if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags |= IFF_PROMISC;
-			} else if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags &= ~IFF_PROMISC;
-			} else
-				return on_off("promisc", *argv);
-		} else if (strcmp(*argv, "trailers") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_NOTRAILERS;
-			if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags |= IFF_NOTRAILERS;
-			} else if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags &= ~IFF_NOTRAILERS;
-			} else
-				return on_off("trailers", *argv);
-		} else if (strcmp(*argv, "arp") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_NOARP;
-			if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags &= ~IFF_NOARP;
-			} else if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags |= IFF_NOARP;
-			} else
-				return on_off("noarp", *argv);
-		} else if (strcmp(*argv, "vf") == 0) {
-			struct rtattr *vflist;
-			NEXT_ARG();
-			if (get_integer(&vf,  *argv, 0)) {
-				invarg("Invalid \"vf\" value\n", *argv);
-			}
-			vflist = addattr_nest(&req->n, sizeof(*req),
-					      IFLA_VFINFO_LIST);
-			len = iplink_parse_vf(vf, &argc, &argv, req);
-			if (len < 0)
-				return -1;
-			addattr_nest_end(&req->n, vflist);
-		} else if (matches(*argv, "master") == 0) {
-			int ifindex;
-			NEXT_ARG();
-			ifindex = ll_name_to_index(*argv);
-			if (!ifindex)
-				invarg("Device does not exist\n", *argv);
-			addattr_l(&req->n, sizeof(*req), IFLA_MASTER,
-				  &ifindex, 4);
-		} else if (matches(*argv, "nomaster") == 0) {
-			int ifindex = 0;
-			addattr_l(&req->n, sizeof(*req), IFLA_MASTER,
-				  &ifindex, 4);
-		} else if (matches(*argv, "dynamic") == 0) {
-			NEXT_ARG();
-			req->i.ifi_change |= IFF_DYNAMIC;
-			if (strcmp(*argv, "on") == 0) {
-				req->i.ifi_flags |= IFF_DYNAMIC;
-			} else if (strcmp(*argv, "off") == 0) {
-				req->i.ifi_flags &= ~IFF_DYNAMIC;
-			} else
-				return on_off("dynamic", *argv);
-		} else if (matches(*argv, "alias") == 0) {
-			NEXT_ARG();
-			addattr_l(&req->n, sizeof(*req), IFLA_IFALIAS,
-				  *argv, strlen(*argv));
-			argc--; argv++;
-			break;
-		} else if (strcmp(*argv, "group") == 0) {
-			NEXT_ARG();
-			if (*group != -1)
-				duparg("group", *argv);
-			if (rtnl_group_a2n(group, *argv))
-				invarg("Invalid \"group\" value\n", *argv);
-		} else if (strcmp(*argv, "mode") == 0) {
-			int mode;
-			NEXT_ARG();
-			mode = get_link_mode(*argv);
-			if (mode < 0)
-				invarg("Invalid link mode\n", *argv);
-			addattr8(&req->n, sizeof(*req), IFLA_LINKMODE, mode);
-		} else if (strcmp(*argv, "state") == 0) {
-			int state;
-			NEXT_ARG();
-			state = get_operstate(*argv);
-			if (state < 0)
-				invarg("Invalid operstate\n", *argv);
-
-			addattr8(&req->n, sizeof(*req), IFLA_OPERSTATE, state);
-		} else if (matches(*argv, "numtxqueues") == 0) {
-			NEXT_ARG();
-			if (numtxqueues != -1)
-				duparg("numtxqueues", *argv);
-			if (get_integer(&numtxqueues, *argv, 0))
-				invarg("Invalid \"numtxqueues\" value\n", *argv);
-			addattr_l(&req->n, sizeof(*req), IFLA_NUM_TX_QUEUES,
-				  &numtxqueues, 4);
-		} else if (matches(*argv, "numrxqueues") == 0) {
-			NEXT_ARG();
-			if (numrxqueues != -1)
-				duparg("numrxqueues", *argv);
-			if (get_integer(&numrxqueues, *argv, 0))
-				invarg("Invalid \"numrxqueues\" value\n", *argv);
-			addattr_l(&req->n, sizeof(*req), IFLA_NUM_RX_QUEUES,
-				  &numrxqueues, 4);
-		}
-#endif
-
 /* Return value becomes exitcode. It's okay to not return at all */
 int FAST_FUNC do_iplink(char **argv)
 {
 	static const char keywords[] ALIGN1 =
 		"add\0""delete\0""set\0""show\0""lst\0""list\0";
+
+	xfunc_error_retval = 2; //TODO: move up to "ip"? Is it the common rule for all "ip" tools?
 	if (*argv) {
 		int key = index_in_substrings(keywords, *argv);
 		if (key < 0) /* invalid argument */
-			invarg(*argv, applet_name);
+			invarg_1_to_2(*argv, applet_name);
 		argv++;
 		if (key <= 1) /* add/delete */
 			return do_add_or_delete(argv, key ? RTM_DELLINK : RTM_NEWLINK);

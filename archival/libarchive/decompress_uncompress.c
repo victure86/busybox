@@ -1,10 +1,10 @@
 /* vi: set sw=4 ts=4: */
-/* uncompress for busybox -- (c) 2002 Robert Griebl
+/*
+ * uncompress for busybox -- (c) 2002 Robert Griebl
  *
  * based on the original compress42.c source
  * (see disclaimer below)
  */
-
 /* (N)compress42.c - File compression ala IEEE Computer, Mar 1992.
  *
  * Authors:
@@ -21,9 +21,7 @@
  * marc@suse.de : a small security fix for a buffer overflow
  *
  * [... History snipped ...]
- *
  */
-
 #include "libbb.h"
 #include "bb_archive.h"
 
@@ -73,7 +71,7 @@
  */
 
 IF_DESKTOP(long long) int FAST_FUNC
-unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
+unpack_Z_stream(transformer_state_t *xstate)
 {
 	IF_DESKTOP(long long total_written = 0;)
 	IF_DESKTOP(long long) int retval = -1;
@@ -102,7 +100,7 @@ unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 	/* block compress mode -C compatible with 2.0 */
 	int block_mode; /* = BLOCK_MODE; */
 
-	if (check_signature16(aux, src_fd, COMPRESS_MAGIC))
+	if (check_signature16(xstate, COMPRESS_MAGIC))
 		return -1;
 
 	inbuf = xzalloc(IBUFSIZ + 64);
@@ -114,7 +112,7 @@ unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 
 	/* xread isn't good here, we have to return - caller may want
 	 * to do some cleanup (e.g. delete incomplete unpacked file etc) */
-	if (full_read(src_fd, inbuf, 1) != 1) {
+	if (full_read(xstate->src_fd, inbuf, 1) != 1) {
 		bb_error_msg("short read");
 		goto err;
 	}
@@ -166,7 +164,7 @@ unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 		}
 
 		if (insize < (int) (IBUFSIZ + 64) - IBUFSIZ) {
-			rsize = safe_read(src_fd, inbuf + insize, IBUFSIZ);
+			rsize = safe_read(xstate->src_fd, inbuf + insize, IBUFSIZ);
 			if (rsize < 0)
 				bb_error_msg_and_die(bb_msg_read_error);
 			insize += rsize;
@@ -274,7 +272,7 @@ unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 						}
 
 						if (outpos >= OBUFSIZ) {
-							xwrite(dst_fd, outbuf, outpos);
+							xtransformer_write(xstate, outbuf, outpos);
 							IF_DESKTOP(total_written += outpos;)
 							outpos = 0;
 						}
@@ -297,11 +295,10 @@ unpack_Z_stream(transformer_aux_data_t *aux, int src_fd, int dst_fd)
 			/* Remember previous code.  */
 			oldcode = incode;
 		}
-
 	} while (rsize > 0);
 
 	if (outpos > 0) {
-		xwrite(dst_fd, outbuf, outpos);
+		xtransformer_write(xstate, outbuf, outpos);
 		IF_DESKTOP(total_written += outpos;)
 	}
 
